@@ -171,5 +171,5 @@ cython_debug/
 .pypirc
 
 # Local files & data
-data/
+data/*.csv
 .DS_Store

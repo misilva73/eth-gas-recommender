@@ -29,6 +29,7 @@ def gather_tx_features_for_day_range(
     end_date_str: str,
     data_dir: str = DATA_DIR,
     block_data_file: str = "eth_blocks_gas_6_months.csv",
+    block_lags: int = 1,
     checkpoint: bool = True,
     return_df: bool = False,
     sample_frac: float = 1.0,
@@ -42,7 +43,9 @@ def gather_tx_features_for_day_range(
         day_str = day_dt.strftime("%Y-%m-%d")
         print(f" ")
         print(f"Processing features for {day_str}...")
-        day_features_df = gather_tx_features_for_day(day_str, data_dir, block_data_file)
+        day_features_df = gather_tx_features_for_day(
+            day_str, data_dir, block_data_file, block_lags
+        )
         if sample_frac < 1.0:
             day_features_df = day_features_df.sample(frac=sample_frac)
         if checkpoint:
@@ -64,6 +67,7 @@ def gather_tx_features_for_day(
     day_str: str = "2025-01-01",
     data_dir: str = DATA_DIR,
     block_data_file: str = "eth_blocks_gas_6_months.csv",
+    block_lags: int = 1,
 ) -> pd.DataFrame:
     # Load mempool dumpster data for main day
     day_tx_df = load_mempool_dumpster_data(day_str, data_dir)
@@ -72,9 +76,9 @@ def gather_tx_features_for_day(
     tx_df = complement_mempool_dumpster_data(day_tx_df, day_str, data_dir, pad_hours=2)
     # Load block data and combine
     blocks_df = load_block_data(block_data_file, data_dir)
-    tx_bl_df = combine_tx_and_block_dfs(tx_df, blocks_df)
+    tx_bl_df = combine_tx_and_block_dfs(tx_df, blocks_df, block_lags)
     # Add aggregated mempool data
-    tx_bl_mem_df = add_mempool_aggegated_features(tx_bl_df)
+    tx_bl_mem_df = add_mempool_aggregated_features(tx_bl_df)
     # Keep only txs from day_str and sort
     features_df = (
         day_tx_hashes.merge(tx_bl_mem_df, how="inner", on="hash")
@@ -161,7 +165,7 @@ def complement_mempool_dumpster_data(
 
 
 def combine_tx_and_block_dfs(
-    tx_df: pd.DataFrame, blocks_df: pd.DataFrame
+    tx_df: pd.DataFrame, blocks_df: pd.DataFrame, block_lags: int
 ) -> pd.DataFrame:
     # Compute previous block height and add to tx data
     block_times = blocks_df[["timestamp", "block_number"]]
@@ -179,23 +183,30 @@ def combine_tx_and_block_dfs(
     )
     # Exclude txs with non-positive delays
     tx_bl_df = tx_bl_df[tx_bl_df["inclusion_delay_blocks"] > 0].reset_index(drop=True)
-    # Add info on last block since tx arrival
-    tx_bl_df = tx_bl_df.merge(
-        blocks_df, how="left", left_on="prev_block_height", right_on="block_number"
-    )
-    tx_bl_df = tx_bl_df.drop(columns=["timestamp", "block_number"])
-    tx_bl_df = tx_bl_df.rename(
-        columns={
-            "size_bytes": "prev_block_size_bytes",
-            "gas_used": "prev_block_gas_used",
-            "transaction_count": "prev_block_tx_count",
-            "base_fee_gwei": "prev_block_base_fee_gwei",
-        }
-    )
+    # Add info on previous blocks since tx arrival (one for each lag level)
+    for lag in range(block_lags):
+        lagged_blocks = blocks_df.copy()
+        lagged_blocks["block_number"] = lagged_blocks["block_number"] + lag
+        tx_bl_df = tx_bl_df.merge(
+            lagged_blocks,
+            how="left",
+            left_on="prev_block_height",
+            right_on="block_number",
+        )
+        tx_bl_df = tx_bl_df.drop(columns=["timestamp", "block_number"])
+        tx_bl_df = tx_bl_df.rename(
+            columns={
+                "size_bytes": f"lag_{lag+1}_block_size_bytes",
+                "gas_used": f"lag_{lag+1}_block_gas_used",
+                "blob_gas_used": f"lag_{lag+1}_block_blob_gas_used",
+                "transaction_count": f"lag_{lag+1}_block_tx_count",
+                "base_fee_gwei": f"lag_{lag+1}_block_base_fee_gwei",
+            }
+        )
     return tx_bl_df
 
 
-def add_mempool_aggegated_features(tx_bl_df: pd.DataFrame) -> pd.DataFrame:
+def add_mempool_aggregated_features(tx_bl_df: pd.DataFrame) -> pd.DataFrame:
     mem_agg_df = compute_aggregated_mempool_features(tx_bl_df)
     tx_bl_mem_df = tx_bl_df.merge(
         mem_agg_df, how="left", left_on="prev_block_height", right_on="block_height"
@@ -234,12 +245,12 @@ def compute_aggregated_mempool_features(tx_bl_df: pd.DataFrame) -> pd.DataFrame:
     mem_agg_df["tx_count"] = mem_df.groupby("in_mempool_at_height").size()
     gas_fee_stats_df = (
         mem_df.groupby("in_mempool_at_height")["gas_fee_cap"]
-        .quantile(np.arange(0, 1.2, 0.2).round(1))
+        .quantile([0.1, 0.5, 0.9])
         .unstack()
     )
     gas_tip_stats_df = (
         mem_df.groupby("in_mempool_at_height")["gas_tip_cap"]
-        .quantile(np.arange(0, 1.2, 0.2).round(1))
+        .quantile([0.1, 0.5, 0.9])
         .unstack()
     )
     mem_agg_df = pd.concat(
@@ -258,6 +269,7 @@ if __name__ == "__main__":
         day_str="2025-01-01",
         data_dir=DATA_DIR,
         block_data_file="eth_blocks_gas_6_months.csv",
+        block_lags=5,
     )
     out_file = os.path.join(DATA_DIR, "debug_output.csv")
     df.to_csv(out_file, index=False)

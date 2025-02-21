@@ -172,4 +172,7 @@ cython_debug/
 
 # Local files & data
 data/*.csv
+data/features/*.csv
+data/mempool_dumpster/*.csv
 .DS_Store
+.vscode
